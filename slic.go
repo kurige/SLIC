@@ -26,20 +26,85 @@ var SLIC_ITERATIONS = 10
  * - Support hexgrid seeding(?)
  */
 
+func rgb2xyz(r, g, b uint32) (x, y, z float64) {
+  var R, G, B float64
+  R = float64(r) / 255.0
+  G = float64(g) / 255.0
+  B = float64(b) / 255.0
+
+  if R <= 0.04045 {
+    R = R / 12.92
+  } else {
+    R = math.Pow((R+0.055)/1.055, 2.4)
+  }
+  if G <= 0.04045 {
+    G = G / 12.92
+  } else {
+    G = math.Pow((G+0.055)/1.055, 2.4)
+  }
+  if B <= 0.04045 {
+    B = B / 12.92
+  } else {
+    B = math.Pow((B+0.055)/1.055, 2.4)
+  }
+
+  x = R*0.4124564 + G*0.3575761 + B*0.1804375
+  y = R*0.2126729 + G*0.7151522 + B*0.0721750
+  z = R*0.0193339 + G*0.1191920 + B*0.9503041
+  return x, y, z
+}
+
+func rgb2lab(_r, _g, _b uint32) (l, a, b float64) {
+  const epsilon float64 = 0.008856
+  const kappa float64 = 903.3
+
+  // Reference white
+  const Xr float64 = 0.950456
+  const Yr float64 = 1.0
+  const Zr float64 = 0.088754
+
+  x, y, z := rgb2xyz(_r, _g, _b)
+  xr := x / Xr
+  yr := y / Yr
+  zr := z / Zr
+
+  var fx, fy, fz float64
+  if xr > epsilon {
+    fx = math.Pow(xr, 1.0/3.0)
+  } else {
+    fx = (kappa*xr + 16.0) / 116.0
+  }
+  if yr > epsilon {
+    fy = math.Pow(yr, 1.0/3.0)
+  } else {
+    fy = (kappa*yr + 16.0) / 116.0
+  }
+  if zr > epsilon {
+    fz = math.Pow(zr, 1.0/3.0)
+  } else {
+    fz = (kappa*zr + 16.0) / 116.0
+  }
+
+  l = 116.0*fy - 16.0
+  a = 500.0 * (fx - fy)
+  b = 200.0 * (fy - fz)
+  return l, a, b
+}
+
 type SuperPixel struct {
   label   int
-  R, G, B float64
+  L, A, B float64
   X, Y    float64
 }
 
 type SLIC struct {
-  r, g, b     []int
-  w, h, sz    int
-  compactness float64
-  step        int
-  labels      []int
-  distvec     []float64
-  superpixels []*SuperPixel
+  lvec, avec, bvec []float64
+  w, h, sz         int
+  compactness      float64
+  step             int
+  labels           []int
+  distvec          []float64
+  superpixels      []*SuperPixel
 }
 
 func makeSlic(image image.Image, compactness float64, size int) *SLIC {
@@ -70,31 +135,27 @@ func makeSlic(image image.Image, compactness float64, size int) *SLIC {
   supsz := x_strips * y_strips
   superpixels := make([]*SuperPixel, supsz)
 
-  log.Println("Image width:", w)
-  log.Println("Image height:", h)
-  log.Println("x-strips:", x_strips)
-  log.Println("y-strips:", y_strips)
-
   log.Println("SLIC:")
   log.Println("\tCompactness:", compactness)
   log.Println("\tSuperpixels:", supsz)
   log.Println("\tStep:", step)
 
-  r := make([]int, sz)
-  g := make([]int, sz)
-  b := make([]int, sz)
+  lvec := make([]float64, sz)
+  avec := make([]float64, sz)
+  bvec := make([]float64, sz)
   for y := 0; y < h; y++ {
     for x := 0; x < w; x++ {
-      img_r, img_g, img_b, _ := image.At(x, y).RGBA()
+      _r, _g, _b, _ := image.At(x, y).RGBA()
+      l, a, b := rgb2lab(_r, _g, _b)
       i := y*w + x
-      r[i] = int(img_r)
-      g[i] = int(img_g)
-      b[i] = int(img_b)
+      lvec[i] = l
+      avec[i] = a
+      bvec[i] = b
     }
   }
 
   slic := &SLIC{
-    r, g, b,
+    lvec, avec, bvec,
     w, h, sz,
     compactness,
     step,
@@ -114,8 +175,9 @@ func makeSlic(image image.Image, compactness float64, size int) *SLIC {
       xe := x * int(x_err_per_strip)
       seedx := x*step + x_offset + xe
       seedy := y*step + y_offset + ye
-      color := image.At(seedx, seedy)
-      superpixels[label] = slic.makeSuperpixel(label, color, seedx, seedy)
+      _r, _g, _b, _ := image.At(seedx, seedy).RGBA()
+      l, a, b := rgb2lab(_r, _g, _b)
+      superpixels[label] = slic.makeSuperpixel(label, l, a, b, seedx, seedy)
       label++
     }
   }
@@ -123,9 +185,8 @@ func makeSlic(image image.Image, compactness float64, size int) *SLIC {
   return slic
 }
 
-func (slic *SLIC) makeSuperpixel(label int, color color.Color, x, y int) *SuperPixel {
-  r, g, b, _ := color.RGBA()
-  superpixel := &SuperPixel{label, float64(r), float64(g), float64(b), float64(x), float64(y)}
+func (slic *SLIC) makeSuperpixel(label int, l, a, b float64, x, y int) *SuperPixel {
+  superpixel := &SuperPixel{label, l, a, b, float64(x), float64(y)}
   return superpixel
 }
 
@@ -149,12 +210,12 @@ func (slic *SLIC) labelPixelsInSuperpixel(s *SuperPixel, wg *sync.WaitGroup) {
     for y := y1; y < y2; y++ {
       for x := x1; x < x2; x++ {
         i := y*slic.w + x
-        r1, g1, b1 := float64(slic.r[i]), float64(slic.g[i]), float64(slic.b[i])
-        r2, g2, b2 := s.R, s.G, s.B
+        l1, a1, b1 := slic.lvec[i], slic.avec[i], slic.bvec[i]
+        l2, a2, b2 := s.L, s.A, s.B
         x1, y1 := float64(x), float64(y)
         x2, y2 := s.X, s.Y
-        var distc float64 = (r1-r2)*(r1-r2) + (g1-g2)*(g1-g2) + (b1-b2)*(b1-b2)
-        var distxy float64 = (x1-x2)*(x1-x2) + (y1-y2)*(y1-y2)
+        var distc float64 = math.Pow((l1-l2), 2) + math.Pow((a1-a2), 2) + math.Pow((b1-b2), 2)
+        var distxy float64 = math.Pow((x1-x2), 2) + math.Pow((y1-y2), 2)
 
         dist := distc + (distxy * invwt)
         // dist := math.Sqrt(distc) + math.Sqrt(distxy*invwt) // More exact
@@ -173,8 +234,8 @@ func (slic *SLIC) labelPixelsInSuperpixel(s *SuperPixel, wg *sync.WaitGroup) {
 
 func (slic *SLIC) recalculateCentroids() {
   supsz := len(slic.superpixels)
-  sigma_r := make([]float64, supsz)
-  sigma_g := make([]float64, supsz)
+  sigma_l := make([]float64, supsz)
+  sigma_a := make([]float64, supsz)
   sigma_b := make([]float64, supsz)
   sigma_x := make([]float64, supsz)
   sigma_y := make([]float64, supsz)
@@ -190,9 +251,9 @@ func (slic *SLIC) recalculateCentroids() {
         continue
       }
       i := y*slic.w + x
-      r, g, b := float64(slic.r[i]), float64(slic.g[i]), float64(slic.b[i])
-      sigma_r[label] += r
-      sigma_g[label] += g
+      l, a, b := slic.lvec[i], slic.avec[i], slic.bvec[i]
+      sigma_l[label] += l
+      sigma_a[label] += a
       sigma_b[label] += b
       sigma_x[label] += float64(x)
       sigma_y[label] += float64(y)
@@ -207,8 +268,8 @@ func (slic *SLIC) recalculateCentroids() {
     }
 
     superpixel := slic.superpixels[n]
-    superpixel.R = sigma_r[n] / clustersize[n]
-    superpixel.G = sigma_g[n] / clustersize[n]
+    superpixel.L = sigma_l[n] / clustersize[n]
+    superpixel.A = sigma_a[n] / clustersize[n]
     superpixel.B = sigma_b[n] / clustersize[n]
     superpixel.X = sigma_x[n] / clustersize[n]
     superpixel.Y = sigma_y[n] / clustersize[n]
@@ -222,9 +283,6 @@ func (slic *SLIC) enforceLabelConnectivity(target_supsz int) (int, []int) {
   height, width := slic.h, slic.w
   sz := slic.w * slic.h
   SUPSZ := sz / target_supsz
-
-  log.Println("Target superpixel count:", target_supsz)
-  log.Println("SUPSZ:", SUPSZ)
 
   xvec := make([]int, sz)
   yvec := make([]int, sz)
@@ -407,8 +465,6 @@ func main() {
   slic := makeSlic(src_img, *compactness, *superpixelsize)
   start := time.Now()
   for i := 0; i < SLIC_ITERATIONS; i++ {
-    log.Println("SLIC Iteration", i)
-
     slic.resetDistances()
     var wg sync.WaitGroup
     for n := range slic.superpixels {
@@ -425,8 +481,7 @@ func main() {
   sz := width * height
   target_superpixels := sz / (slic.step * slic.step)
   new_labels_count, new_labels := slic.enforceLabelConnectivity(target_superpixels)
-
-  log.Println("Final labels count:", new_labels_count)
+  log.Println("Final superpixel count:", new_labels_count)
 
   for i := 0; i < sz; i++ {
     // log.Println(new_labels[i])
