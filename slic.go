@@ -25,69 +25,80 @@ var SLIC_ITERATIONS = 10
  * - Support hexgrid seeding(?)
  */
 
-func rgb2xyz(r, g, b uint32) (x, y, z float64) {
-  var R, G, B float64
-  R = float64(r) / 255.0
-  G = float64(g) / 255.0
-  B = float64(b) / 255.0
+func rgb2xyz(r, g, b uint32) (X, Y, Z float64) {
+  var (
+    R = float64(r) / 255.0
+    G = float64(g) / 255.0
+    B = float64(b) / 255.0
+  )
 
-  if R <= 0.04045 {
+  if R > 0.04045 {
+    R = math.Pow(((R + 0.055) / 1.055), 2.4)
+  } else {
     R = R / 12.92
-  } else {
-    R = math.Pow((R+0.055)/1.055, 2.4)
   }
-  if G <= 0.04045 {
+  if G > 0.04045 {
+    G = math.Pow(((G + 0.055) / 1.055), 2.4)
+  } else {
     G = G / 12.92
-  } else {
-    G = math.Pow((G+0.055)/1.055, 2.4)
   }
-  if B <= 0.04045 {
-    B = B / 12.92
+  if B > 0.04045 {
+    B = math.Pow(((B + 0.055) / 1.055), 2.4)
   } else {
-    B = math.Pow((B+0.055)/1.055, 2.4)
+    B = B / 12.92
   }
 
-  x = R*0.4124564 + G*0.3575761 + B*0.1804375
-  y = R*0.2126729 + G*0.7151522 + B*0.0721750
-  z = R*0.0193339 + G*0.1191920 + B*0.9503041
-  return x, y, z
+  R = R * 100.0
+  G = G * 100.0
+  B = B * 100.0
+
+  //Observer. = 2°, Illuminant = D65
+  X = R*0.4124 + G*0.3576 + B*0.1805
+  Y = R*0.2126 + G*0.7152 + B*0.0722
+  Z = R*0.0193 + G*0.1192 + B*0.9505
+  return
 }
 
-func rgb2lab(_r, _g, _b uint32) (l, a, b float64) {
+func xyz2lab(x, y, z float64) (L, A, B float64) {
   const epsilon float64 = 0.008856
-  const kappa float64 = 903.3
+  const kappa float64 = 7.787
 
-  // Reference white
-  const Xr float64 = 0.950456
-  const Yr float64 = 1.0
-  const Zr float64 = 0.088754
+  // Observer = 2°, Illuminant = D65
+  const rX float64 = 95.047
+  const rY float64 = 100.000
+  const rZ float64 = 108.883
 
-  x, y, z := rgb2xyz(_r, _g, _b)
-  xr := x / Xr
-  yr := y / Yr
-  zr := z / Zr
+  var (
+    X = x / rX
+    Y = y / rY
+    Z = z / rZ
+  )
 
-  var fx, fy, fz float64
-  if xr > epsilon {
-    fx = math.Pow(xr, 1.0/3.0)
+  if X > epsilon {
+    X = math.Pow(X, (1.0 / 3.0))
   } else {
-    fx = (kappa*xr + 16.0) / 116.0
+    X = (kappa * X) + (16.0 / 116.0)
   }
-  if yr > epsilon {
-    fy = math.Pow(yr, 1.0/3.0)
+  if Y > epsilon {
+    Y = math.Pow(Y, (1.0 / 3.0))
   } else {
-    fy = (kappa*yr + 16.0) / 116.0
+    Y = (kappa * Y) + (16.0 / 116.0)
   }
-  if zr > epsilon {
-    fz = math.Pow(zr, 1.0/3.0)
+  if Z > epsilon {
+    Z = math.Pow(Z, (1.0 / 3.0))
   } else {
-    fz = (kappa*zr + 16.0) / 116.0
+    Z = (kappa * Z) + (16.0 / 116.0)
   }
 
-  l = 116.0*fy - 16.0
-  a = 500.0 * (fx - fy)
-  b = 200.0 * (fy - fz)
-  return l, a, b
+  L = (116.0 * Y) - 16.0
+  A = 500.0 * (X - Y)
+  B = 200.0 * (Y - Z)
+  return
+}
+
+func rgb2lab(r, g, b uint32) (L, A, B float64) {
+  x, y, z := rgb2xyz(r, g, b)
+  return xyz2lab(x, y, z)
 }
 
 type SuperPixel struct {
@@ -144,12 +155,14 @@ func makeSlic(image image.Image, compactness float64, size int) *SLIC {
   bvec := make([]float64, sz)
   for y := 0; y < h; y++ {
     for x := 0; x < w; x++ {
-      _r, _g, _b, _ := image.At(x, y).RGBA()
-      l, a, b := rgb2lab(_r, _g, _b)
-      i := y*w + x
-      lvec[i] = l
-      avec[i] = a
-      bvec[i] = b
+      var (
+        i          = y*w + x
+        r, g, b, _ = image.At(x, y).RGBA()
+        L, A, B    = rgb2lab(r, g, b)
+      )
+      lvec[i] = L
+      avec[i] = A
+      bvec[i] = B
     }
   }
 
@@ -174,8 +187,8 @@ func makeSlic(image image.Image, compactness float64, size int) *SLIC {
       xe := x * int(x_err_per_strip)
       seedx := x*step + x_offset + xe
       seedy := y*step + y_offset + ye
-      _r, _g, _b, _ := image.At(seedx, seedy).RGBA()
-      l, a, b := rgb2lab(_r, _g, _b)
+      i := seedy*slic.w + seedx
+      l, a, b := lvec[i], avec[i], bvec[i]
       superpixels[label] = slic.makeSuperpixel(label, l, a, b, seedx, seedy)
       label++
     }
@@ -204,25 +217,25 @@ func (slic *SLIC) labelPixelsInSuperpixel(s *SuperPixel) {
   x1 := int(math.Max(0.0, s.X-fstep))
   x2 := int(math.Min(float64(slic.w), s.X+fstep))
 
-    for y := y1; y < y2; y++ {
-      for x := x1; x < x2; x++ {
-        i := y*slic.w + x
-        l1, a1, b1 := slic.lvec[i], slic.avec[i], slic.bvec[i]
-        l2, a2, b2 := s.L, s.A, s.B
-        x1, y1 := float64(x), float64(y)
-        x2, y2 := s.X, s.Y
-        var distc float64 = math.Pow((l1-l2), 2) + math.Pow((a1-a2), 2) + math.Pow((b1-b2), 2)
-        var distxy float64 = math.Pow((x1-x2), 2) + math.Pow((y1-y2), 2)
+  for y := y1; y < y2; y++ {
+    for x := x1; x < x2; x++ {
+      i := y*slic.w + x
+      l1, a1, b1 := slic.lvec[i], slic.avec[i], slic.bvec[i]
+      l2, a2, b2 := s.L, s.A, s.B
+      x1, y1 := float64(x), float64(y)
+      x2, y2 := s.X, s.Y
+      var distc float64 = math.Pow((l1-l2), 2) + math.Pow((a1-a2), 2) + math.Pow((b1-b2), 2)
+      var distxy float64 = math.Pow((x1-x2), 2) + math.Pow((y1-y2), 2)
 
-        dist := distc + (distxy * invwt)
-        // dist := math.Sqrt(distc) + math.Sqrt(distxy*invwt) // More exact
+      dist := distc + (distxy * invwt)
+      // dist := math.Sqrt(distc) + math.Sqrt(distxy*invwt) // More exact
 
-        if dist < slic.distvec[i] {
-          slic.distvec[i] = dist
-          slic.labels[i] = s.label
-        }
+      if dist < slic.distvec[i] {
+        slic.distvec[i] = dist
+        slic.labels[i] = s.label
       }
     }
+  }
 }
 
 func (slic *SLIC) recalculateCentroids() {
