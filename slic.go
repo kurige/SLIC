@@ -12,7 +12,7 @@ import (
   "math"
   "os"
   "runtime"
-  "strconv"
+  "runtime/pprof"
   "time"
 )
 
@@ -20,7 +20,8 @@ var SLIC_ITERATIONS = 10
 
 /*
  * TODO:
- * - Switch to LAB colorspace
+ * - More accurate LAB color diffing
+ * - "Upgrade" to SLICO (or make it an option)
  * - Perturb superpixels during seeding
  * - Support hexgrid seeding(?)
  */
@@ -150,9 +151,12 @@ func makeSlic(image image.Image, compactness float64, size int) *SLIC {
   log.Println("\tSuperpixels:", supsz)
   log.Println("\tStep:", step)
 
-  lvec := make([]float64, sz)
-  avec := make([]float64, sz)
-  bvec := make([]float64, sz)
+  var (
+    lvec = make([]float64, sz)
+    avec = make([]float64, sz)
+    bvec = make([]float64, sz)
+  )
+
   for y := 0; y < h; y++ {
     for x := 0; x < w; x++ {
       var (
@@ -428,14 +432,18 @@ func writePNGToDisk(img image.Image, filename string) {
   out.Close()
 }
 
+var (
+  // outputName = flag.String("o", "output", "\t\tName of the output filename (sans extension)")
+  // outputExt = flag.Uint("e", 1, "\t\tOutput extension type:\n\t\t\t 1 \t png (default)\n\t\t\t 2 \t jpg")
+  // jpgQuality = flag.Int("q", 90, "\t\tJPG output quality")
+  num_cores      = flag.Int("n", 0, "Max number of cores to utilize (0 means use all available)")
+  superpixels    = flag.Int("pixels", -1, "Number of superpixels to use")
+  superpixelsize = flag.Int("size", 40, "Super pixel size")
+  compactness    = flag.Float64("c", 20.0, "Superpixel 'compactness'")
+  cpuprofile     = flag.String("cpuprofile", "", "write cpu profile to file")
+)
+
 func main() {
-  // outputName := flag.String("o", "output", "\t\tName of the output filename (sans extension)")
-  // outputExt := flag.Uint("e", 1, "\t\tOutput extension type:\n\t\t\t 1 \t png (default)\n\t\t\t 2 \t jpg")
-  // jpgQuality := flag.Int("q", 90, "\t\tJPG output quality")
-  num_cores := flag.Int("cores", 0, "Max number of cores to utilize (0 means use all available)")
-  superpixels := flag.Int("superpixels", -1, "Number of superpixels to use")
-  superpixelsize := flag.Int("superpixelsize", 40, "Super pixel size")
-  compactness := flag.Float64("compactness", 20.0, "Superpixel 'compactness'")
   flag.Parse()
 
   var nc int
@@ -446,6 +454,15 @@ func main() {
   }
   runtime.GOMAXPROCS(nc)
   log.Println("Number of Cores:", nc)
+
+  if *cpuprofile != "" {
+    f, err := os.Create(*cpuprofile)
+    if err != nil {
+      log.Fatal(err)
+    }
+    pprof.StartCPUProfile(f)
+    defer pprof.StopCPUProfile()
+  }
 
   file_name := flag.Arg(0)
   file, err := os.Open(file_name)
@@ -479,7 +496,7 @@ func main() {
 
     slic.recalculateCentroids()
 
-    writePNGToDisk(slic.drawEdgesToImage(src_img), "out_"+strconv.Itoa(i)+".png")
+    // writePNGToDisk(slic.drawEdgesToImage(src_img), "out_"+strconv.Itoa(i)+".png")
   }
 
   sz := width * height
