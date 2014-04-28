@@ -13,7 +13,6 @@ import (
   "os"
   "runtime"
   "strconv"
-  "sync"
   "time"
 )
 
@@ -196,7 +195,7 @@ func (slic *SLIC) resetDistances() {
   }
 }
 
-func (slic *SLIC) labelPixelsInSuperpixel(s *SuperPixel, wg *sync.WaitGroup) {
+func (slic *SLIC) labelPixelsInSuperpixel(s *SuperPixel) {
   fstep := float64(slic.step)
   invwt := 1.0 / ((fstep / slic.compactness) * (fstep / slic.compactness))
 
@@ -205,8 +204,6 @@ func (slic *SLIC) labelPixelsInSuperpixel(s *SuperPixel, wg *sync.WaitGroup) {
   x1 := int(math.Max(0.0, s.X-fstep))
   x2 := int(math.Min(float64(slic.w), s.X+fstep))
 
-  wg.Add(1)
-  go func() {
     for y := y1; y < y2; y++ {
       for x := x1; x < x2; x++ {
         i := y*slic.w + x
@@ -224,12 +221,8 @@ func (slic *SLIC) labelPixelsInSuperpixel(s *SuperPixel, wg *sync.WaitGroup) {
           slic.distvec[i] = dist
           slic.labels[i] = s.label
         }
-        // fmt.Print(strconv.FormatFloat(dist, 'f', 2, 64) + "\t")
       }
-      // fmt.Print("\n")
     }
-    wg.Done()
-  }()
 }
 
 func (slic *SLIC) recalculateCentroids() {
@@ -466,12 +459,10 @@ func main() {
   start := time.Now()
   for i := 0; i < SLIC_ITERATIONS; i++ {
     slic.resetDistances()
-    var wg sync.WaitGroup
     for n := range slic.superpixels {
       superpixel := slic.superpixels[n]
-      slic.labelPixelsInSuperpixel(superpixel, &wg)
+      slic.labelPixelsInSuperpixel(superpixel)
     }
-    wg.Wait()
 
     slic.recalculateCentroids()
 
