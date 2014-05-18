@@ -5,7 +5,8 @@ import (
   "image/color"
   "image/draw"
   "math"
-  "sync"
+
+  "github.com/kurige/SLIC/lab"
 )
 
 /*
@@ -24,26 +25,29 @@ type SuperPixel struct {
 }
 
 type SLIC struct {
-  lvec, avec, bvec []float64
-  w, h, sz         int
-  compactness      float64
-  step             int
-  distvec          []float64
-  superpixels      []*SuperPixel
+  image       lab.Image
+  compactness float64
+  step        int
+  distvec     []float64
+  Superpixels []*SuperPixel
+  XStrips     int
+  YStrips     int
 
-  Labels []int
+  Labels     []int
+  labelCount int
 }
 
 func SuperPixelSizeForCount(width, height, count int) int {
   return int(0.5 + float64(width*height)/float64(count))
 }
 
-func MakeSlic(image image.Image, compactness float64, size int) *SLIC {
-  w := image.Bounds().Size().X
-  h := image.Bounds().Size().Y
-  sz := w * h
-  step := int(math.Sqrt(float64(size)) + 0.5)
-
+func MakeSlic(image image.Image, compactness float64, supsz int) *SLIC {
+  var (
+    w    = image.Bounds().Size().X
+    h    = image.Bounds().Size().Y
+    sz   = w * h
+    step = int(math.Sqrt(float64(supsz)) + 0.5)
+  )
   x_strips := int(0.5 + float64(w)/float64(step))
   y_strips := int(0.5 + float64(h)/float64(step))
   x_err := w - step*x_strips
@@ -63,27 +67,24 @@ func MakeSlic(image image.Image, compactness float64, size int) *SLIC {
   }
   distvec := make([]float64, sz)
 
-  supsz := x_strips * y_strips
+  // Overwrite user selected superpixel count if necessary.
+  supsz = x_strips * y_strips
   superpixels := make([]*SuperPixel, supsz)
 
-  // log.Println("Image:")
-  // log.Println("\tSize:", w, "x", h)
-  // log.Println("SLIC:")
-  // log.Println("\tCompactness:", compactness)
-  // log.Println("\tSuperpixels:", supsz)
-  // log.Println("\tStep:", step)
-
-  lvec, avec, bvec := imageToLab(image)
+  img := lab.ImageToLab(image)
 
   slic := &SLIC{
-    lvec, avec, bvec,
-    w, h, sz,
+    img,
     compactness,
     step,
     distvec,
     superpixels,
 
+    x_strips,
+    y_strips,
+
     labels,
+    0,
   }
 
   x_err_per_strip := float64(x_err) / float64(x_strips)
@@ -94,12 +95,13 @@ func MakeSlic(image image.Image, compactness float64, size int) *SLIC {
   for y := 0; y < y_strips; y++ {
     ye := y * int(y_err_per_strip)
     for x := 0; x < x_strips; x++ {
-      xe := x * int(x_err_per_strip)
-      seedx := x*step + x_offset + xe
-      seedy := y*step + y_offset + ye
-      i := seedy*slic.w + seedx
-      l, a, b := lvec[i], avec[i], bvec[i]
-      superpixels[label] = slic.makeSuperpixel(label, l, a, b, seedx, seedy)
+      var (
+        xe    = x * int(x_err_per_strip)
+        seedx = x*step + x_offset + xe
+        seedy = y*step + y_offset + ye
+        c     = img.At(seedx, seedy).(lab.Color)
+      )
+      superpixels[label] = &SuperPixel{label, c.L, c.A, c.B, float64(seedx), float64(seedy)}
       label++
     }
   }
@@ -113,24 +115,18 @@ func (slic *SLIC) Run(iterations int) {
   }
   for i := 0; i < iterations; i++ {
     slic.resetDistances()
-    var wg sync.WaitGroup
-    for n := range slic.superpixels {
-      superpixel := slic.superpixels[n]
-      go slic.labelPixelsInSuperpixel(superpixel, &wg)
-    }
-    wg.Wait()
+    slic.labelPixels()
     slic.recalculateCentroids()
   }
 
-  new_labels := slic.enforceLabelConnectivity()
-  for i := 0; i < slic.sz; i++ {
+  label_count, new_labels := slic.enforceLabelConnectivity()
+  slic.labelCount = label_count
+
+  size := slic.image.Bounds().Size()
+  sz := size.X * size.Y
+  for i := 0; i < sz; i++ {
     slic.Labels[i] = new_labels[i]
   }
-}
-
-func (slic *SLIC) makeSuperpixel(label int, l, a, b float64, x, y int) *SuperPixel {
-  superpixel := &SuperPixel{label, l, a, b, float64(x), float64(y)}
-  return superpixel
 }
 
 func (slic *SLIC) resetDistances() {
@@ -139,31 +135,36 @@ func (slic *SLIC) resetDistances() {
   }
 }
 
-func (slic *SLIC) labelPixelsInSuperpixel(s *SuperPixel, wg *sync.WaitGroup) {
-  wg.Add(1)
-  defer wg.Done()
+func (slic *SLIC) labelPixels() {
+  for n := range slic.Superpixels {
+    slic.labelPixelsInSuperpixel(slic.Superpixels[n])
+  }
+}
 
+func (slic *SLIC) labelPixelsInSuperpixel(s *SuperPixel) {
   fstep := float64(slic.step)
   invwt := 1.0 / ((fstep / slic.compactness) * (fstep / slic.compactness))
 
+  size := slic.image.Bounds().Size()
+  width, height := size.X, size.Y
   y1 := int(math.Max(0.0, s.Y-fstep))
-  y2 := int(math.Min(float64(slic.h), s.Y+fstep))
+  y2 := int(math.Min(float64(height), s.Y+fstep))
   x1 := int(math.Max(0.0, s.X-fstep))
-  x2 := int(math.Min(float64(slic.w), s.X+fstep))
+  x2 := int(math.Min(float64(width), s.X+fstep))
 
   supL, supA, supB := s.L, s.A, s.B
   supX, supY := s.X, s.Y
 
   for y := y1; y < y2; y++ {
     for x := x1; x < x2; x++ {
-      i := y*slic.w + x
-      L, A, B := slic.lvec[i], slic.avec[i], slic.bvec[i]
+      c := slic.image.At(x, y).(lab.Color)
       X, Y := float64(x), float64(y)
-      var distc float64 = (L-supL)*(L-supL) + (A-supA)*(A-supA) + (B-supB)*(B-supB)
+      var distc float64 = (c.L-supL)*(c.L-supL) + (c.A-supA)*(c.A-supA) + (c.B-supB)*(c.B-supB)
       var distxy float64 = (X-supX)*(X-supX) + (Y-supY)*(Y-supY)
 
       dist := math.Sqrt(distc) + math.Sqrt(distxy*invwt)
 
+      i := y*width + x
       if dist < slic.distvec[i] {
         slic.distvec[i] = dist
         slic.Labels[i] = s.label
@@ -172,8 +173,39 @@ func (slic *SLIC) labelPixelsInSuperpixel(s *SuperPixel, wg *sync.WaitGroup) {
   }
 }
 
+func (slic *SLIC) AverageColors() (lvec, avec, bvec []float64) {
+  lvec = make([]float64, slic.labelCount)
+  avec = make([]float64, slic.labelCount)
+  bvec = make([]float64, slic.labelCount)
+  count := make([]int, slic.labelCount)
+
+  size := slic.image.Bounds().Size()
+  width, height := size.X, size.Y
+
+  for y := 0; y < height; y++ {
+    for x := 0; x < width; x++ {
+      i := y*width + x
+      label := slic.Labels[i]
+      c := slic.image.At(x, y).(lab.Color)
+      lvec[label] += c.L
+      avec[label] += c.A
+      bvec[label] += c.B
+      count[label]++
+    }
+  }
+
+  for i := 0; i < slic.labelCount; i++ {
+    count := float64(count[i])
+    lvec[i] = lvec[i] / count
+    avec[i] = avec[i] / count
+    bvec[i] = bvec[i] / count
+  }
+
+  return
+}
+
 func (slic *SLIC) recalculateCentroids() {
-  supsz := len(slic.superpixels)
+  supsz := len(slic.Superpixels)
   sigma_l := make([]float64, supsz)
   sigma_a := make([]float64, supsz)
   sigma_b := make([]float64, supsz)
@@ -181,18 +213,21 @@ func (slic *SLIC) recalculateCentroids() {
   sigma_y := make([]float64, supsz)
   clustersize := make([]float64, supsz)
 
-  for y := 0; y < slic.h; y++ {
-    for x := 0; x < slic.w; x++ {
-      i := y*slic.w + x
+  size := slic.image.Bounds().Size()
+  width, height := size.X, size.Y
+
+  for y := 0; y < height; y++ {
+    for x := 0; x < width; x++ {
+      i := y*width + x
       label := slic.Labels[i]
       // This needs to be handled better...
       if label == -1 {
         continue
       }
-      l, a, b := slic.lvec[i], slic.avec[i], slic.bvec[i]
-      sigma_l[label] += l
-      sigma_a[label] += a
-      sigma_b[label] += b
+      c := slic.image.At(x, y).(lab.Color)
+      sigma_l[label] += c.L
+      sigma_a[label] += c.A
+      sigma_b[label] += c.B
       sigma_x[label] += float64(x)
       sigma_y[label] += float64(y)
       clustersize[label] += 1.0
@@ -204,7 +239,7 @@ func (slic *SLIC) recalculateCentroids() {
       clustersize[n] = 1.0
     }
 
-    superpixel := slic.superpixels[n]
+    superpixel := slic.Superpixels[n]
     superpixel.L = sigma_l[n] / clustersize[n]
     superpixel.A = sigma_a[n] / clustersize[n]
     superpixel.B = sigma_b[n] / clustersize[n]
@@ -213,15 +248,15 @@ func (slic *SLIC) recalculateCentroids() {
   }
 }
 
-func (slic *SLIC) enforceLabelConnectivity() []int {
-  target_supsz := slic.sz / (slic.step * slic.step)
+func (slic *SLIC) enforceLabelConnectivity() (int, []int) {
+  size := slic.image.Bounds().Size()
+  width, height := size.X, size.Y
+  sz := width * height
+  target_supsz := sz / (slic.step * slic.step)
+  SUPSZ := sz / target_supsz
 
   dx4 := [...]int{-1, 0, 1, 0}
   dy4 := [...]int{0, -1, 0, 1}
-
-  height, width := slic.h, slic.w
-  sz := slic.w * slic.h
-  SUPSZ := sz / target_supsz
 
   xvec := make([]int, sz)
   yvec := make([]int, sz)
@@ -290,7 +325,7 @@ func (slic *SLIC) enforceLabelConnectivity() []int {
     }
   }
 
-  return nlabels
+  return label, nlabels
 }
 
 func (slic *SLIC) DrawEdgesToImage(img image.Image) image.Image {
@@ -302,7 +337,8 @@ func (slic *SLIC) DrawEdgesToImage(img image.Image) image.Image {
   dx8 := []int{-1, -1, 0, 1, 1, 1, 0, -1}
   dy8 := []int{0, -1, -1, -1, 0, 1, 1, 1}
 
-  width, height := slic.w, slic.h
+  size := slic.image.Bounds().Size()
+  width, height := size.X, size.Y
   sz := width * height
   contourx := make([]int, sz)
   contoury := make([]int, sz)
