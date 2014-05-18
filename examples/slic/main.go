@@ -6,8 +6,8 @@ import (
   "fmt"
   "image"
   _ "image/gif"
-  "image/jpeg"
-  _ "image/png"
+  _ "image/jpeg"
+  "image/png"
   "log"
   "os"
   "runtime"
@@ -20,8 +20,8 @@ type handlerFunc func(*os.File)
 
 func outputPNG(img image.Image, filename string) {
   fi, _ := os.Create(filename)
-  // png.Encode(fi, img)
-  jpeg.Encode(fi, img, &jpeg.Options{jpeg.DefaultQuality})
+  png.Encode(fi, img)
+  //jpeg.Encode(fi, img, &jpeg.Options{jpeg.DefaultQuality})
 }
 
 func outputLabels(w, h int, labels []int, filename string) {
@@ -47,7 +47,7 @@ var (
   // outputName = flag.String("o", "output", "\t\tName of the output filename (sans extension)")
   // outputExt = flag.Uint("e", 1, "\t\tOutput extension type:\n\t\t\t 1 \t png (default)\n\t\t\t 2 \t jpg")
   // jpgQuality = flag.Int("q", 90, "\t\tJPG output quality")
-  num_cores      = flag.Int("n", 0, "Max number of cores to utilize (0 means use all available)")
+  num_cores      = flag.Int("cpu", 0, "Max number of cores to utilize (0 means use all available)")
   superpixels    = flag.Int("pixels", -1, "Number of superpixels to use")
   superpixelsize = flag.Int("size", 40, "Super pixel size")
   compactness    = flag.Float64("c", 20.0, "Superpixel 'compactness'")
@@ -98,6 +98,6 @@ func main() {
   s := slic.MakeSlic(src_img, *compactness, *superpixelsize)
   s.Run(*iterations)
 
-  outputPNG(s.DrawEdgesToImage(src_img), "out.jpg")
-  outputLabels(w, h, s.Labels, "out.labels")
+  outputPNG(s.DrawEdgesToImage(src_img), "out.png")
+  // outputLabels(w, h, s.Labels, "out.labels")
 }
